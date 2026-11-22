@@ -1,0 +1,20 @@
+application:
+  subdomain: longfor-sign
+  routes:
+    - /=http://longfor.cloud.lazycat.app.longfor-sign.lzcapp:8000
+
+services:
+  longfor:
+    image: embed:app
+    # Dockerfile 中的非 root 用户 UID/GID，同时让 /lzcapp/var 下的数据目录归该用户所有
+    run_as: "10001:10001"
+    environment:
+      - DATA_DIR=/data
+      - COOKIE_SECURE=true
+      # 外层是 YAML 单引号字符串；\x27 即单引号，渲染时翻倍转义，避免密码里的 ' 破坏 YAML。
+      # 不要改用 | quote：它会在单引号里再包一层双引号，变量名变成 "ADMIN_PASSWORD。
+      - 'ADMIN_USERNAME={{ index .U "admin_username" | replace "\x27" "\x27\x27" }}'
+      - 'ADMIN_PASSWORD={{ index .U "admin_password" | replace "\x27" "\x27\x27" }}'
+    binds:
+      # SQLite 数据库、加密密钥 .key 与调度状态，必须整体持久化
+      - /lzcapp/var/data:/data

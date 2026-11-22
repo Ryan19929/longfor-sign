@@ -92,3 +92,9 @@ desktop.ini
 .env.*
 !.env.example
 !requirements.txt
+
+# 懒猫微服构建产物
+lazycat/*.lpk
+lzc-build-image-context.tar
+!lazycat/icon.png
+lazycat/.lzc-cli-cache/

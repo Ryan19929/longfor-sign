@@ -1,0 +1,10 @@
+manifest: ./lzc-manifest.yml
+pkgout: ./
+icon: ./icon.png
+
+images:
+  app:
+    # 单独的 Dockerfile + 仓库根目录作上下文：lzc-cli 只打包 COPY 用到的文件并遵守 .dockerignore。
+    # 不用 dockerfile-content，因为它会临时覆盖上下文目录里的 Dockerfile。
+    dockerfile: ./Dockerfile
+    context: ..

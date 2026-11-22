@@ -1,0 +1,20 @@
+package: cloud.lazycat.app.longfor-sign
+version: 0.2.0
+name: Longfor Sign
+description: 龙湖多账号每日随机签到管理面板（小程序与 APP、验证码自动处理、Bark 推送）
+author: CheerfulChen
+license: MIT
+homepage: https://github.com/CheerfulChen/longfor-sign
+locales:
+  zh:
+    name: 龙湖签到
+    description: 龙湖多账号每日随机签到管理面板（小程序与 APP、验证码自动处理、Bark 推送）
+  zh_CN:
+    name: 龙湖签到
+    description: 龙湖多账号每日随机签到管理面板（小程序与 APP、验证码自动处理、Bark 推送）
+  en:
+    name: Longfor Sign
+    description: Multi-account daily random check-in dashboard for Longfor
+permissions:
+  required:
+    - net.internet
