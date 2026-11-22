@@ -25,9 +25,11 @@ class Worker:
             raise RuntimeError('数据目录已被另一个服务使用，请保持单实例、单 worker') from None
         now = time.time()
         with self.store.transaction() as db:
-            running = db.execute("SELECT COUNT(*) FROM jobs WHERE state='running'").fetchone()[0]
-            db.execute("UPDATE jobs SET state='unknown',message=?,finished=? WHERE state='running'",
-                       ('上次执行中断，结果待确认；请在客户端核实，不自动重试。', now))
+            running = db.execute("""SELECT (SELECT COUNT(*) FROM jobs WHERE state='running')
+                + (SELECT COUNT(*) FROM checks WHERE state='running')""").fetchone()[0]
+            for table in ('jobs', 'checks'):
+                db.execute(f"UPDATE {table} SET state='unknown',message=?,finished=? WHERE state='running'",
+                           ('上次执行中断，结果待确认；请在客户端核实，不自动重试。', now))
             if running:
                 db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('last_finish', str(now)))
         self.thread = threading.Thread(target=self.loop, name='sign-scheduler', daemon=True)
@@ -46,24 +48,34 @@ class Worker:
             ensure_plans(self.store, db, now)
             db.execute("UPDATE jobs SET state='missed',message=?,finished=? WHERE state='pending' AND window_end<=?",
                        ('时间段已结束，未执行；请检查服务运行时间或调整间隔。', now, now))
-            if db.execute("SELECT 1 FROM jobs WHERE state='running' LIMIT 1").fetchone():
+            if db.execute("""SELECT 1 FROM jobs WHERE state='running'
+                UNION ALL SELECT 1 FROM checks WHERE state='running' LIMIT 1""").fetchone():
                 return None
-            settings = self.store.settings(db)
-            last = db.execute("SELECT value FROM meta WHERE key='last_finish'").fetchone()
-            if last and now < float(last[0]) + settings['gap_minutes'] * 60:
-                return None
-            job = db.execute('''SELECT j.* FROM jobs j JOIN accounts a ON j.account_id=a.id
-                WHERE j.state='pending' AND a.enabled=1 AND j.run_at<=? AND j.window_end>?
-                AND (?=1 OR j.manual=1) ORDER BY j.run_at,j.id LIMIT 1''',
-                (now, now, int(settings['enabled']))).fetchone()
-            if job is None:
-                return None
-            db.execute("UPDATE jobs SET state='running',started=? WHERE id=? AND state='pending'", (now, job['id']))
+            # On-demand checks run as soon as nothing else is executing: they skip the
+            # account gap and the scheduler switch, but still update last_finish below.
+            check = db.execute('''SELECT c.* FROM checks c JOIN accounts a ON c.account_id=a.id
+                WHERE c.state='pending' AND a.enabled=1 ORDER BY c.requested,c.id LIMIT 1''').fetchone()
+            if check is not None:
+                kind, job = 'check', check
+            else:
+                settings = self.store.settings(db)
+                last = db.execute("SELECT value FROM meta WHERE key='last_finish'").fetchone()
+                if last and now < float(last[0]) + settings['gap_minutes'] * 60:
+                    return None
+                job = db.execute('''SELECT j.* FROM jobs j JOIN accounts a ON j.account_id=a.id
+                    WHERE j.state='pending' AND a.enabled=1 AND j.run_at<=? AND j.window_end>?
+                    AND (?=1 OR j.manual=1) ORDER BY j.run_at,j.id LIMIT 1''',
+                    (now, now, int(settings['enabled']))).fetchone()
+                if job is None:
+                    return None
+                kind = 'job'
+            table = 'checks' if kind == 'check' else 'jobs'
+            db.execute(f"UPDATE {table} SET state='running',started=? WHERE id=? AND state='pending'", (now, job['id']))
             account = next(a for a in self.store.list_accounts(db, private=True) if a['id'] == job['account_id'])
             # Captcha credentials are supplied by the user for one task only.
             if account['app_captcha']:
                 db.execute("UPDATE accounts SET app_captcha='' WHERE id=?", (account['id'],))
-            return dict(job), account
+            return dict(job, kind=kind), account
 
     def execute(self, account):
         from core.service import execute
@@ -83,7 +95,8 @@ class Worker:
                 state, message, details = 'unknown', '执行异常（{}），请核实客户端记录；不自动重试。'.format(type(exc).__name__), {}
             finished = time.time()
             with self.store.transaction() as db:
-                db.execute('UPDATE jobs SET state=?,message=?,details=?,finished=? WHERE id=?',
+                table = 'checks' if job['kind'] == 'check' else 'jobs'
+                db.execute(f'UPDATE {table} SET state=?,message=?,details=?,finished=? WHERE id=?',
                            (state, message, json.dumps(details, ensure_ascii=False), finished, job['id']))
                 db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)', ('last_finish', str(finished)))
         self.deliver(now)

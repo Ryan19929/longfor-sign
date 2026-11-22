@@ -54,6 +54,12 @@ class Store:
                 CREATE TABLE IF NOT EXISTS summaries (
                   day TEXT PRIMARY KEY, sent INTEGER NOT NULL DEFAULT 0,
                   attempts INTEGER NOT NULL DEFAULT 0, retry_after REAL NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS checks (
+                  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL,
+                  requested REAL NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                  message TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '{}',
+                  started REAL, finished REAL);
+                CREATE INDEX IF NOT EXISTS checks_due ON checks(state, requested);
             ''')
             columns = {r['name'] for r in db.execute('PRAGMA table_info(accounts)')}
             for column in ('app_token', 'app_captcha', 'mini_user_agent', 'app_user_agent'):
@@ -109,7 +115,7 @@ class Store:
             raise ValueError('账号配置必须是 JSON 对象')
         with self.transaction() as db:
             rows = self.list_accounts(db, private=True)
-            if ident and db.execute("SELECT 1 FROM jobs WHERE account_id=? AND state='running'", (ident,)).fetchone():
+            if ident and self.running(db, ident):
                 raise ValueError('账号正在执行，请结束后再修改')
             original = next((a for a in rows if a['id'] == ident), None)
             if ident and not original:
@@ -163,6 +169,13 @@ class Store:
             if planner:
                 planner(db)
         return ident
+
+    @staticmethod
+    def running(db, ident):
+        """Whether a scheduled job or an on-demand check is executing for the account."""
+        return db.execute("""SELECT 1 FROM jobs WHERE account_id=? AND state='running'
+            UNION ALL SELECT 1 FROM checks WHERE account_id=? AND state='running' LIMIT 1""",
+            (ident, ident)).fetchone() is not None
 
     def update_token(self, ident, token):
         with self.transaction() as db:

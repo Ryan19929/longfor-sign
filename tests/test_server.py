@@ -320,3 +320,68 @@ def test_per_client_user_agents_persist_and_reach_worker(app,auth,monkeypatch):
     assert refreshed==[{'user_agent':'Captured mini UA'}]
     assert calls==[('mini-new',protocol.MINI_ACTIVITY,{'user_agent':'Captured mini UA'}),
                    ('private-app-login',protocol.APP_ACTIVITY,{'captcha':'','user_agent':'Captured app UA'})]
+
+
+def test_check_now_runs_after_finished_day_without_touching_plan(app,auth,monkeypatch):
+    ident=add(auth)
+    browser,headers=auth
+    store=app.extensions['store']
+    with store.transaction() as db:
+        db.execute("UPDATE jobs SET state='failed',message='旧结果',finished=? WHERE account_id=?",(NOW-10,ident))
+        db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('last_finish',str(NOW-10)))
+    assert browser.put('/api/settings',json={'enabled':False},headers=headers).status_code==200
+    assert browser.post('/api/accounts/'+ident+'/run',headers=headers).status_code==409
+    assert browser.post('/api/accounts/'+ident+'/check',headers=headers).status_code==200
+    assert browser.post('/api/accounts/'+ident+'/check',headers=headers).status_code==409
+    monkeypatch.setattr(protocol,'refresh_token',lambda token:(None,'续期失败'))
+    calls=[]
+    monkeypatch.setattr(protocol,'checkin',lambda *args:calls.append(args) or {'status':'success','message':'今日已签（日历确认）'})
+    worker=Worker(store)
+    sent=[];monkeypatch.setattr(worker,'send',lambda *args:sent.append(args) or True)
+    # Skips the account gap and the disabled scheduler, but only once.
+    assert worker.tick(NOW)
+    assert not worker.tick(NOW+10)
+    assert len(calls)==1
+    check=store.rows('SELECT * FROM checks')[0]
+    assert check['state']=='success' and '今日已签' in check['message']
+    job=store.rows('SELECT * FROM jobs WHERE account_id=?',(ident,))[0]
+    assert job['state']=='failed' and job['message']=='旧结果'
+    assert not any('今日已签' in str(args) for args in sent)
+    assert float(store.rows("SELECT value FROM meta WHERE key='last_finish'")[0]['value'])>=NOW
+    dashboard=browser.get('/api/dashboard').json
+    assert dashboard['checks'][0]['state']=='success'
+    assert b'private-login-1' not in browser.get('/api/dashboard').data
+    assert browser.post('/api/accounts/'+ident+'/check',headers=headers).status_code==200
+
+
+def test_check_now_waits_for_running_job_and_rejects_disabled(app,auth):
+    first=add(auth,1);second=add(auth,2)
+    browser,headers=auth
+    store=app.extensions['store'];make_due(store)
+    worker=Worker(store)
+    claimed=worker.claim(NOW)
+    assert claimed and claimed[0]['kind']=='job'
+    assert browser.post('/api/accounts/'+second+'/check',headers=headers).status_code==200
+    assert worker.claim(NOW) is None
+    with store.transaction() as db:
+        db.execute("UPDATE jobs SET state='success',finished=? WHERE id=?",(NOW,claimed[0]['id']))
+        db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('last_finish',str(NOW)))
+    check=worker.claim(NOW+1)
+    assert check and check[0]['kind']=='check' and check[1]['id']==second
+    # Editing or deleting is blocked while the check runs.
+    assert browser.put('/api/accounts/'+second,json={'name':'改名'},headers=headers).status_code==400
+    assert browser.delete('/api/accounts/'+second,headers=headers).status_code==400
+    assert browser.put('/api/accounts/'+first,json={'enabled':False},headers=headers).status_code==200
+    assert browser.post('/api/accounts/'+first+'/check',headers=headers).status_code==400
+
+
+def test_restart_marks_interrupted_check_unknown(app,auth,monkeypatch):
+    ident=add(auth);browser,headers=auth;store=app.extensions['store']
+    assert browser.post('/api/accounts/'+ident+'/check',headers=headers).status_code==200
+    assert Worker(store).claim(NOW)[0]['kind']=='check'
+    monkeypatch.setattr(Worker,'loop',lambda self:None)
+    worker=Worker(store);worker.start()
+    try:
+        assert store.rows('SELECT state FROM checks')[0]['state']=='unknown'
+    finally:
+        worker.stop_event.set();worker.thread.join();worker.lock_file.close()

@@ -127,12 +127,14 @@ def create_app(config=None):
         jobs = store.rows('SELECT * FROM jobs WHERE day=? ORDER BY run_at', (today,))
         history = store.rows("SELECT * FROM jobs WHERE state NOT IN ('pending','cancelled') ORDER BY COALESCE(started,run_at) DESC LIMIT 100")
         upcoming = store.rows("SELECT * FROM jobs WHERE state='pending' AND window_end>? ORDER BY run_at LIMIT 100", (now,))
+        checks = store.rows("SELECT * FROM checks WHERE state!='cancelled' ORDER BY requested DESC LIMIT 50")
         def present(items):
             for job in items:
                 job['details'] = json.loads(job['details'])
             return items
         return jsonify(settings=settings, accounts=accounts, today=today, now=now,
-                       jobs=present(jobs), history=present(history), upcoming=present(upcoming))
+                       jobs=present(jobs), history=present(history), upcoming=present(upcoming),
+                       checks=present(checks))
 
     @app.post('/api/accounts')
     def add_account():
@@ -143,18 +145,17 @@ def create_app(config=None):
     @app.put('/api/accounts/<ident>')
     def edit_account(ident):
         data = request.get_json(silent=True)
-        if store.rows("SELECT id FROM jobs WHERE account_id=? AND state='running'", (ident,)):
-            raise ValueError('该账号正在执行，请结束后再修改')
         store.save_account(data, ident, planner=lambda db: ensure_plans(store, db, replace=True))
         return jsonify(ok=True)
 
     @app.delete('/api/accounts/<ident>')
     def delete_account(ident):
         with store.transaction() as db:
-            if db.execute("SELECT id FROM jobs WHERE account_id=? AND state='running'", (ident,)).fetchone():
+            if store.running(db, ident):
                 raise ValueError('该账号正在执行，请结束后再删除')
             db.execute('DELETE FROM accounts WHERE id=?', (ident,))
             db.execute("UPDATE jobs SET state='cancelled' WHERE account_id=? AND state='pending'", (ident,))
+            db.execute("UPDATE checks SET state='cancelled' WHERE account_id=? AND state='pending'", (ident,))
             ensure_plans(store, db, replace=True)
         return jsonify(ok=True)
 
@@ -177,6 +178,20 @@ def create_app(config=None):
                 run_at=excluded.run_at,window_end=excluded.window_end,state='pending',manual=1''',
                 (uuid.uuid4().hex, day, ident, account['name'], now, midnight))
         return jsonify(ok=True, message='已加入执行队列，将遵守账号间最小间隔')
+
+    @app.post('/api/accounts/<ident>/check')
+    def check_now(ident):
+        # Independent of today's plan: the client checks the calendar first, so an
+        # already-signed account only reports the calendar state without re-signing.
+        with store.transaction() as db:
+            account = db.execute('SELECT id,name FROM accounts WHERE id=? AND enabled=1', (ident,)).fetchone()
+            if not account:
+                raise ValueError('账号不存在或已停用')
+            if db.execute("SELECT 1 FROM checks WHERE account_id=? AND state IN ('pending','running')", (ident,)).fetchone():
+                return jsonify(error='该账号已有一次立即验证在排队或执行中'), 409
+            db.execute('INSERT INTO checks(id,account_id,name,requested) VALUES(?,?,?,?)',
+                       (uuid.uuid4().hex, ident, account['name'], time.time()))
+        return jsonify(ok=True, message='已开始立即验证，结果稍后显示在账号卡片和执行记录中')
 
     @app.put('/api/settings')
     def settings_update():
