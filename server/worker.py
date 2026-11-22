@@ -7,6 +7,7 @@ from datetime import datetime
 
 import requests
 from core import client
+from . import lazycat
 from .scheduling import ensure_plans
 
 
@@ -102,11 +103,24 @@ class Worker:
         self.deliver(now)
         return bool(claimed)
 
-    def send(self, title, body):
+    def channels(self, title, body):
+        """Send through every configured channel; return {channel: delivered}."""
         settings = self.store.settings()
+        results = {}
         key = self.store.decrypt(settings.get('bark_key', ''))
-        if not key:
-            return False
+        if key:
+            results['bark'] = self.bark(key, title, body)
+        if settings.get('lazycat_notify') and settings.get('lazycat_uid'):
+            results['lazycat'] = lazycat.send(settings['lazycat_uid'], title, body)
+        return results
+
+    def send(self, title, body):
+        # One delivered channel counts as notified, so a failing channel never
+        # makes the others repeat; with none configured it stays unnotified.
+        return any(self.channels(title, body).values())
+
+    @staticmethod
+    def bark(key, title, body):
         try:
             with requests.Session() as session:
                 session.trust_env = False

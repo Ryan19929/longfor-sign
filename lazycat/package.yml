@@ -1,10 +1,12 @@
 package: cloud.lazycat.app.longfor-sign
-version: 0.2.0
+version: 0.3.0
 name: Longfor Sign
 description: 龙湖多账号每日随机签到管理面板（小程序与 APP、验证码自动处理、Bark 推送）
 author: CheerfulChen
 license: MIT
 homepage: https://github.com/CheerfulChen/longfor-sign
+# user.notify（推送到懒猫 App）需要 lzcos 1.6.0。
+min_os_version: 1.6.0
 locales:
   zh:
     name: 龙湖签到
@@ -18,3 +20,6 @@ locales:
 permissions:
   required:
     - net.internet
+  optional:
+    # 声明后 lzcos 会向容器注入 /lzcinit/notify-send
+    - user.notify

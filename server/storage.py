@@ -9,6 +9,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from . import lazycat
+
 DEFAULTS = {'mode': 'all_day', 'start': '08:00', 'end': '22:00',
             'timezone': 'Asia/Shanghai', 'gap_minutes': 15, 'enabled': True}
 CREDENTIALS = ('token', 'risk', 'app_risk', 'app_token', 'app_captcha', 'mini_user_agent', 'app_user_agent')
@@ -186,6 +188,8 @@ class Store:
         settings = self.settings()
         settings.pop('bark_key', None)
         settings['has_bark_key'] = bool(self.settings().get('bark_key'))
+        settings['lazycat_notify'] = bool(settings.get('lazycat_notify'))
+        settings['lazycat_available'] = lazycat.available()
         return settings
 
     def rows(self, sql, params=()):

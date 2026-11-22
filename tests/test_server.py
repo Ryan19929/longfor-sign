@@ -385,3 +385,63 @@ def test_restart_marks_interrupted_check_unknown(app,auth,monkeypatch):
         assert store.rows('SELECT state FROM checks')[0]['state']=='unknown'
     finally:
         worker.stop_event.set();worker.thread.join();worker.lock_file.close()
+
+
+def fake_notify_send(tmp_path, monkeypatch, exit_code=0):
+    from server import lazycat
+    log = tmp_path / 'notify-args'
+    script = tmp_path / 'notify-send'
+    script.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > "{}"\nexit {}\n'.format(log, exit_code))
+    script.chmod(0o755)
+    monkeypatch.setattr(lazycat, 'NOTIFY_SEND', str(script))
+    monkeypatch.setenv('LAZYCAT_APP_DOMAIN', 'longfor-sign.example.heiyu.space')
+    return log
+
+
+def test_lazycat_send_arguments_and_failure(tmp_path, monkeypatch):
+    from server import lazycat
+    assert not lazycat.send('uid-1', '标题', '正文')  # no channel outside Lazycat
+    log = fake_notify_send(tmp_path, monkeypatch)
+    assert lazycat.available()
+    assert not lazycat.send('bad uid; rm', '标题', '正文')
+    assert not log.exists()
+    assert lazycat.send('ryan', '龙湖签到 · di · success', '第一行\n第二行')
+    assert log.read_text().split('\n')[:5] == ['--uid', 'ryan', '--deeplink-url',
+                                               'https://longfor-sign.example.heiyu.space', '龙湖签到 · di · success']
+    assert '第一行\n第二行' in log.read_text()
+    fake_notify_send(tmp_path, monkeypatch, exit_code=3)
+    assert not lazycat.send('ryan', '标题', '正文')
+
+
+def test_lazycat_toggle_records_requesting_user(app, auth, tmp_path, monkeypatch):
+    browser, headers = auth
+    assert browser.put('/api/settings', json={'lazycat_notify': True}, headers=headers).status_code == 400
+    assert browser.put('/api/settings', json={'lazycat_notify': 'yes'}, headers=dict(headers, **{'X-HC-User-ID': 'ryan'})).status_code == 400
+    assert browser.get('/api/dashboard').json['settings']['lazycat_notify'] is False
+    assert browser.put('/api/settings', json={'lazycat_notify': True}, headers=dict(headers, **{'X-HC-User-ID': 'ryan'})).status_code == 200
+    settings = browser.get('/api/dashboard').json['settings']
+    assert settings['lazycat_notify'] is True and settings['lazycat_uid'] == 'ryan'
+    assert settings['lazycat_available'] is False
+    # Saving Bark alone keeps the Lazycat choice.
+    assert browser.put('/api/settings', json={'bark_key': 'private-bark'}, headers=headers).status_code == 200
+    assert browser.get('/api/dashboard').json['settings']['lazycat_notify'] is True
+    assert browser.put('/api/settings', json={'lazycat_notify': False}, headers=headers).status_code == 200
+    assert browser.get('/api/dashboard').json['settings']['lazycat_notify'] is False
+
+
+def test_any_channel_marks_notified_and_test_reports_each(app, auth, tmp_path, monkeypatch):
+    browser, headers = auth
+    log = fake_notify_send(tmp_path, monkeypatch)
+    worker = app.extensions['sign_worker']
+    assert browser.post('/api/notifications/test', headers=headers).status_code == 400
+    assert browser.put('/api/settings', json={'bark_key': 'private-bark', 'lazycat_notify': True},
+                       headers=dict(headers, **{'X-HC-User-ID': 'ryan'})).status_code == 200
+    monkeypatch.setattr(worker, 'bark', lambda *args: False)
+    assert worker.channels('t', 'b') == {'bark': False, 'lazycat': True}
+    assert worker.send('t', 'b') is True
+    result = browser.post('/api/notifications/test', headers=headers)
+    assert result.status_code == 400
+    assert 'Bark 发送失败' in result.json['message'] and '懒猫 App 已发送' in result.json['message']
+    assert 'ryan' in log.read_text()
+    monkeypatch.setattr(worker, 'bark', lambda *args: True)
+    assert browser.post('/api/notifications/test', headers=headers).status_code == 200

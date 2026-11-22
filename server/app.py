@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from . import lazycat
 from .scheduling import dates, ensure_plans, validate
 from .storage import Store
 from .worker import Worker
@@ -210,6 +211,16 @@ def create_app(config=None):
                 settings['bark_key'] = store.encrypt(data['bark_key'].strip())
             if data.get('clear_bark_key') is True:
                 settings.pop('bark_key', None)
+            if 'lazycat_notify' in data:
+                if not isinstance(data['lazycat_notify'], bool):
+                    raise ValueError('懒猫通知开关无效')
+                if data['lazycat_notify']:
+                    # Notify whoever turns it on: the Lazycat user of this request.
+                    uid = request.headers.get(lazycat.USER_HEADER, '')
+                    if not lazycat.valid_uid(uid):
+                        raise ValueError('没有识别到懒猫登录用户；请通过懒猫微服的地址打开面板后再开启')
+                    settings['lazycat_uid'] = uid
+                settings['lazycat_notify'] = data['lazycat_notify']
             count = db.execute('SELECT COUNT(*) FROM accounts WHERE enabled=1').fetchone()[0]
             validate(settings, count)
             db.execute("UPDATE meta SET value=? WHERE key='settings'", (json.dumps(settings),))
@@ -219,8 +230,14 @@ def create_app(config=None):
 
     @app.post('/api/notifications/test')
     def test_notification():
-        ok = worker.send('Longfor Sign · 测试推送', '推送已连接，之后会在这里收到签到结果。')
-        return jsonify(ok=ok, message='测试推送已发送' if ok else '推送失败，请检查 Bark Key 和服务器网络'), (200 if ok else 400)
+        results = worker.channels('Longfor Sign · 测试推送', '推送已连接，之后会在这里收到签到结果。')
+        if not results:
+            return jsonify(ok=False, message='还没有配置推送：请填写 Bark Key 或开启懒猫 App 通知'), 400
+        names = {'bark': 'Bark', 'lazycat': '懒猫 App'}
+        hints = {'bark': '检查 Bark Key 和服务器网络', 'lazycat': '确认应用已获得通知权限，且是在懒猫微服上运行'}
+        message = '；'.join('{} {}'.format(names[k], '已发送' if v else '发送失败，请' + hints[k]) for k, v in results.items())
+        ok = all(results.values())
+        return jsonify(ok=ok, message=message), (200 if ok else 400)
 
     if config.get('START_WORKER', True):
         worker.start()

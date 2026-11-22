@@ -1,5 +1,8 @@
 application:
   subdomain: longfor-sign
+  # 懒猫会停掉长时间没人打开的应用；签到调度要常驻，同时随微服开机自启。
+  # 只对单实例有效，不要开 multi_instance。
+  background_task: true
   routes:
     - /=http://longfor.cloud.lazycat.app.longfor-sign.lzcapp:8000
 
