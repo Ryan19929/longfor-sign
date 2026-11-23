@@ -189,6 +189,7 @@ class Store:
         settings.pop('bark_key', None)
         settings['has_bark_key'] = bool(self.settings().get('bark_key'))
         settings['lazycat_notify'] = bool(settings.get('lazycat_notify'))
+        settings['lazycat_login'] = bool(settings.get('lazycat_login'))
         settings['lazycat_available'] = lazycat.available()
         return settings
 

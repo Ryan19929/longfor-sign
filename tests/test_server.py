@@ -445,3 +445,44 @@ def test_any_channel_marks_notified_and_test_reports_each(app, auth, tmp_path, m
     assert 'ryan' in log.read_text()
     monkeypatch.setattr(worker, 'bark', lambda *args: True)
     assert browser.post('/api/notifications/test', headers=headers).status_code == 200
+
+
+def lazycat_client(app, uid=None):
+    browser = app.test_client()
+    extra = {'X-HC-User-ID': uid} if uid else {}
+    page = browser.get('/', headers=extra)
+    with browser.session_transaction() as session:
+        csrf = session['csrf']
+    return browser, dict(extra, **{'X-CSRF-Token': csrf}), page
+
+
+def test_lazycat_login_trusts_only_bound_account(app, auth):
+    browser, headers = auth
+    # Not trusted until turned on, and turning it on needs a Lazycat user.
+    other, other_headers, page = lazycat_client(app, 'ryan')
+    assert b'login-form' in page.data and other.get('/api/dashboard', headers=other_headers).status_code == 401
+    assert browser.put('/api/settings', json={'lazycat_login': True}, headers=headers).status_code == 400
+    assert browser.put('/api/settings', json={'lazycat_login': True},
+                       headers=dict(headers, **{'X-HC-User-ID': 'ryan'})).status_code == 200
+    # The bound account gets straight in, without a password session.
+    owner, owner_headers, page = lazycat_client(app, 'ryan')
+    assert b'login-form' not in page.data
+    dashboard = owner.get('/api/dashboard', headers=owner_headers)
+    assert dashboard.status_code == 200
+    assert dashboard.json['viewer'] == {'auth': 'lazycat', 'lazycat_uid': 'ryan'}
+    assert dashboard.json['settings']['lazycat_login'] is True
+    assert owner.post('/api/accounts', json={'name': '懒猫', 'token': 'lz-login', 'risk': 'lz-risk'},
+                      headers=owner_headers).status_code == 201
+    # CSRF still applies to header-authenticated writes.
+    no_csrf = {'X-HC-User-ID': 'ryan'}
+    assert owner.put('/api/settings', json={'lazycat_login': False}, headers=no_csrf).status_code == 403
+    # Other Lazycat accounts and requests without the header still need the password.
+    for uid in ('family', None):
+        client, client_headers, page = lazycat_client(app, uid)
+        assert b'login-form' in page.data
+        assert client.get('/api/dashboard', headers=client_headers).status_code == 401
+    # The password session keeps working and reports itself.
+    assert browser.get('/api/dashboard').json['viewer']['auth'] == 'password'
+    # Turning it off ends header access.
+    assert owner.put('/api/settings', json={'lazycat_login': False}, headers=owner_headers).status_code == 200
+    assert owner.get('/api/dashboard', headers=owner_headers).status_code == 401

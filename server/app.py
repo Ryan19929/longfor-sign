@@ -35,6 +35,19 @@ def create_app(config=None):
     worker = Worker(store)
     app.extensions.update(store=store, sign_worker=worker)
 
+    def password_session():
+        return bool(session.get('authenticated')) and time.time() - session.get('issued', 0) <= 28800
+
+    def lazycat_admin():
+        # Ingress sets X-HC-User-ID on every logged-in request and the manifest has
+        # no public paths, so only the Lazycat account bound in settings matches.
+        uid = request.headers.get(lazycat.USER_HEADER, '')
+        if not lazycat.valid_uid(uid):
+            return False
+        settings = store.settings()
+        bound = settings.get('lazycat_admin_uid', '')
+        return bool(settings.get('lazycat_login')) and bool(bound) and hmac.compare_digest(uid, bound)
+
     def csrf():
         if 'csrf' not in session:
             session['csrf'] = secrets.token_urlsafe(32)
@@ -51,7 +64,7 @@ def create_app(config=None):
                 return jsonify(error='会话校验失败，请刷新页面'), 403
         if request.path in ('/', '/api/login'):
             return None
-        if not session.get('authenticated') or time.time() - session.get('issued', 0) > 28800:
+        if not password_session() and not lazycat_admin():
             return jsonify(error='请先登录'), 401
         return None
 
@@ -82,7 +95,7 @@ def create_app(config=None):
 
     @app.get('/')
     def index():
-        authenticated = session.get('authenticated') and time.time() - session.get('issued', 0) <= 28800
+        authenticated = password_session() or lazycat_admin()
         return render_template('index.html' if authenticated else 'login.html', csrf=csrf())
 
     @app.post('/api/login')
@@ -133,7 +146,10 @@ def create_app(config=None):
             for job in items:
                 job['details'] = json.loads(job['details'])
             return items
-        return jsonify(settings=settings, accounts=accounts, today=today, now=now,
+        uid = request.headers.get(lazycat.USER_HEADER, '')
+        viewer = {'auth': 'password' if password_session() else 'lazycat',
+                  'lazycat_uid': uid if lazycat.valid_uid(uid) else ''}
+        return jsonify(settings=settings, accounts=accounts, today=today, now=now, viewer=viewer,
                        jobs=present(jobs), history=present(history), upcoming=present(upcoming),
                        checks=present(checks))
 
@@ -211,6 +227,16 @@ def create_app(config=None):
                 settings['bark_key'] = store.encrypt(data['bark_key'].strip())
             if data.get('clear_bark_key') is True:
                 settings.pop('bark_key', None)
+            if 'lazycat_login' in data:
+                if not isinstance(data['lazycat_login'], bool):
+                    raise ValueError('懒猫免登录开关无效')
+                if data['lazycat_login']:
+                    # Bind exactly the Lazycat account that turns it on.
+                    uid = request.headers.get(lazycat.USER_HEADER, '')
+                    if not lazycat.valid_uid(uid):
+                        raise ValueError('没有识别到懒猫登录用户；请通过懒猫微服的地址打开面板后再开启')
+                    settings['lazycat_admin_uid'] = uid
+                settings['lazycat_login'] = data['lazycat_login']
             if 'lazycat_notify' in data:
                 if not isinstance(data['lazycat_notify'], bool):
                     raise ValueError('懒猫通知开关无效')

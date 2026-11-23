@@ -1,5 +1,5 @@
 package: cloud.lazycat.app.longfor-sign
-version: 0.3.0
+version: 0.4.0
 name: Longfor Sign
 description: 龙湖多账号每日随机签到管理面板（小程序与 APP、验证码自动处理、Bark 推送）
 author: CheerfulChen
